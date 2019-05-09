@@ -33,4 +33,6 @@
 
 # Visual Studio stuff
 *.user
+Debug
+Release
 .vs
