@@ -9,6 +9,7 @@
 #include <ahtse.h>
 #include <receive_context.h>
 #include <png.h>
+#include <cctype>
 
 using namespace std;
 
@@ -109,6 +110,25 @@ static const char *set_regexp(cmd_parms *cmd, png_conf *c, const char *pattern)
     return add_regexp_to_array(cmd->pool, &c->arr_rxp, pattern);
 }
 
+// Parses a byte value, returns the value and advances the *src,
+// Sets *src to null on error
+static apr_byte_t scan_byte(char **src, int base = 0) {
+    char *entry = *src;
+    while (isspace(*entry))
+        entry++;
+
+    if (isdigit(*entry)) {
+        apr_int64_t val = apr_strtoi64(entry, &entry, base);
+        if (!errno && val >= 0 && val <= 0xff) {
+            *src = entry;
+            return static_cast<apr_byte_t>(val);
+        }
+    }
+    // Report an error by setting the src to nullptr
+    *src = nullptr;
+    return 0;
+}
+
 // Entries should be in the order of index values
 // Index 0 defaults to 0 0 0 0
 static const char *build_palette(apr_array_header_t *entries, apr_byte_t *v, int *len)
@@ -116,20 +136,21 @@ static const char *build_palette(apr_array_header_t *entries, apr_byte_t *v, int
     enum {R = 0, G, B, A, N};
     int ix = 0; // previous index
     for (int i = 0; i < entries->nelts; i++) {
-        char * entry = APR_ARRAY_IDX(entries, i, char *);
+        char *entry = APR_ARRAY_IDX(entries, i, char *);
         // An entry is: Index Red Green Blue Alpha, white space separated
-        int idx = N * (apr_strtoi64(entry, &entry, 0) & 0xff);
-        if (errno)
+        int idx = N * scan_byte(&entry);
+        if (!entry)
             return "Invalid entry format";
         if (idx <= ix && !(ix == 0 && idx == 0))
             return "Entries have to be sorted by index value";
         for (int c = R; c <= A; c++) {
-            v[idx + c] = apr_strtoi64(entry, &entry, 0) & 0xff;
-            if (errno)
-                v[idx + c] = 0;
+            v[idx + c] = scan_byte(&entry);
+            if (!entry) {
+                if (A != c)
+                    return "Entry parsing error, should be at least 4 space separated byte values";
+                v[idx + A] = 0xff;
+            }
         }
-        if (errno)
-            v[idx + A] = 0xff; // opaque by default
 
         for (int j = ix + N; j < idx; j += N) { // Interpolate
             double fraction = static_cast<double>(j - ix) / (idx - ix);
@@ -214,7 +235,7 @@ static const command_rec cmds[] = {
     )
 
     ,AP_INIT_TAKE1(
-        "AHTSE_PNG_Configuration",
+        "AHTSE_PNG_ConfigurationFile",
         (cmd_func) configure,
         0,
         ACCESS_CONF,
