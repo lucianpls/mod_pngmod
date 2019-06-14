@@ -8,7 +8,6 @@
 
 #include <ahtse.h>
 #include <receive_context.h>
-#include <png.h>
 #include <cctype>
 
 using namespace std;
@@ -17,6 +16,24 @@ NS_AHTSE_USE
 
 extern module AP_MODULE_DECLARE_DATA ahtse_png_module;
 
+// Colors, anonymous enum
+enum { RED = 0, GREEN, BLUE, ALPHA };
+
+// PNG constants
+static const apr_byte_t PNGSIG[8] = { 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a };
+static const apr_byte_t IHDR[4] = { 0x49, 0x48, 0x44, 0x52 };
+static const apr_byte_t PLTE[4] = { 0x50, 0x4c, 0x54, 0x45 };
+static const apr_byte_t tRNS[4] = { 0x74, 0x52, 0x4e, 0x53 };
+static const apr_byte_t IDAT[4] = { 0x49, 0x44, 0x41, 0x54 };
+static const apr_byte_t IEND[4] = { 0x49, 0x45, 0x4e, 0x44 };
+
+// Compares two u32, alignemnt and order insensitive
+static int is_same_u32(const apr_byte_t *chunk, const apr_byte_t *src) {
+    return chunk[0] == src[0] &&
+        chunk[1] == src[1] &&
+        chunk[2] == src[2] &&
+        chunk[3] == src[3];
+}
 
 // PNG CRC implementation, slightly modified for C++ from zlib, single table
 static apr_uint32_t update_crc32(unsigned char *buf, int len, 
@@ -79,8 +96,24 @@ static apr_uint32_t update_crc32(unsigned char *buf, int len,
 
     apr_uint32_t val = crc;
     for (int n = 0; n < len; n++)
-        val = table[val ^ *buf++] ^ (val >> 8);
+        val = table[(val ^ *buf++) & 0xff] ^ (val >> 8);
     return val;
+}
+
+// PNG values are always big endian
+static void poke_u32be(apr_byte_t *dst, apr_uint32_t val) {
+    dst[0] = static_cast<apr_byte_t>((val >> 24) & 0xff);
+    dst[1] = static_cast<apr_byte_t>((val >> 16) & 0xff);
+    dst[2] = static_cast<apr_byte_t>((val >> 8) & 0xff);
+    dst[3] = static_cast<apr_byte_t>(val & 0xff);
+}
+
+static apr_uint32_t peek_u32be(const apr_byte_t *src) {
+    return
+        (static_cast<apr_uint32_t>(src[0]) << 24) +
+        (static_cast<apr_uint32_t>(src[1]) << 16) +
+        (static_cast<apr_uint32_t>(src[2]) << 8) +
+        (static_cast<apr_uint32_t>(src[3]));
 }
 
 // The transmitted value is 1's complement
@@ -133,28 +166,27 @@ static apr_byte_t scan_byte(char **src, int base = 0) {
 // Index 0 defaults to 0 0 0 0
 static const char *build_palette(apr_array_header_t *entries, apr_byte_t *v, int *len)
 {
-    enum {R = 0, G, B, A, N};
     int ix = 0; // previous index
     for (int i = 0; i < entries->nelts; i++) {
         char *entry = APR_ARRAY_IDX(entries, i, char *);
         // An entry is: Index Red Green Blue Alpha, white space separated
-        int idx = N * scan_byte(&entry);
+        int idx = 4 * scan_byte(&entry);
         if (!entry)
             return "Invalid entry format";
         if (idx <= ix && !(ix == 0 && idx == 0))
             return "Entries have to be sorted by index value";
-        for (int c = R; c <= A; c++) {
+        for (int c = RED; c <= ALPHA; c++) {
             v[idx + c] = scan_byte(&entry);
             if (!entry) {
-                if (A != c)
+                if (ALPHA != c)
                     return "Entry parsing error, should be at least 4 space separated byte values";
-                v[idx + A] = 0xff;
+                v[idx + ALPHA] = 0xff;
             }
         }
 
-        for (int j = ix + N; j < idx; j += N) { // Interpolate
+        for (int j = ix + 4; j < idx; j += 4) { // Interpolate
             double fraction = static_cast<double>(j - ix) / (idx - ix);
-            for (int c = R; c <= A; c++)
+            for (int c = RED; c <= ALPHA; c++)
                 v[j + c] = static_cast<apr_byte_t>(0.5 + v[ix + c] 
                     + fraction * (v[idx + c] - v[ix + c]));
         }
@@ -162,6 +194,13 @@ static const char *build_palette(apr_array_header_t *entries, apr_byte_t *v, int
     }
     *len = ix / 4 + 1;
     return nullptr;
+}
+
+// returns the number of entries in the tRNS
+static int tRNSlen(const apr_byte_t *arr, int len) {
+    while (len && arr[(len - 1) * 4 + ALPHA] == 255)
+        len--;
+    return len;
 }
 
 static const char *configure(cmd_parms *cmd, png_conf *c, const char *fname)
@@ -178,12 +217,34 @@ static const char *configure(cmd_parms *cmd, png_conf *c, const char *fname)
         auto entries = tokenize(cmd->temp_pool, line, ',');
         if (entries->nelts > 256)
             return "Maximum number of entries is 256";
-        auto v = reinterpret_cast<apr_byte_t *>(
+        auto arr = reinterpret_cast<apr_byte_t *>(
             apr_pcalloc(cmd->temp_pool, 256 * 4));
         int len = 0;
-        err_message = build_palette(entries, v, &len);
+        err_message = build_palette(entries, arr, &len);
         if (err_message)
             return err_message;
+        // Allocate and convert
+        auto chunk_PLTE = reinterpret_cast<apr_byte_t *>(apr_pcalloc(cmd->pool, 3 * len + 12));
+        poke_u32be(chunk_PLTE, 3 * len);
+        poke_u32be(chunk_PLTE + 4, peek_u32be(PLTE));
+        apr_byte_t *p = chunk_PLTE + 8;
+        for (int i = 0; i < len * 4; i += 4)
+            for (int c = RED; c < ALPHA; c++)
+                *p++ = arr[i * 4 + c];
+        poke_u32be(chunk_PLTE + 3 * len + 8, crc32(chunk_PLTE + 4, 3 * len + 4));
+        c->chunk_PLTE = chunk_PLTE;
+        // Same for the tRNS, if needed
+        int tlen = tRNSlen(arr, len);
+        if (tlen) {
+            auto chunk_tRNS = reinterpret_cast<apr_byte_t *>(apr_pcalloc(cmd->pool, tlen + 12));
+            poke_u32be(chunk_tRNS, tlen);
+            poke_u32be(chunk_tRNS + 4, peek_u32be(tRNS));
+            apr_byte_t *p = chunk_tRNS + 8;
+            for (int i = 0; i < tlen; i++)
+                *p++ = arr[i * 4 + ALPHA];
+            poke_u32be(chunk_PLTE + 3 * len + 8, crc32(chunk_PLTE + 4, len + 4));
+            c->chunk_tRNS = chunk_tRNS;
+        }
     }
     return nullptr;
 }
