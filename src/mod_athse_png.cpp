@@ -90,10 +90,12 @@ static apr_uint32_t crc32(unsigned char *buf, int len)
 
 struct png_conf {
     apr_array_header_t *arr_rxp;
-    int indirect;  // Subrequests only
-    int only;      // Block non-pngs
-    char *source;  // source path
-    char *postfix; // optional postfix
+    int indirect;        // Subrequests only
+    int only;            // Block non-pngs
+    char *source;        // source path
+    char *postfix;       // optional postfix
+    apr_byte_t *chunk_PLTE;    // the PLTE chunk
+    apr_byte_t *chunk_tRNS;    // the tRNS chunk
 };
 
 static void *create_dir_config(apr_pool_t *p, char *dummy) {
@@ -105,6 +107,64 @@ static void *create_dir_config(apr_pool_t *p, char *dummy) {
 static const char *set_regexp(cmd_parms *cmd, png_conf *c, const char *pattern)
 {
     return add_regexp_to_array(cmd->pool, &c->arr_rxp, pattern);
+}
+
+// Entries should be in the order of index values
+// Index 0 defaults to 0 0 0 0
+static const char *build_palette(apr_array_header_t *entries, apr_byte_t *v, int *len)
+{
+    enum {R = 0, G, B, A, N};
+    int ix = 0; // previous index
+    for (int i = 0; i < entries->nelts; i++) {
+        char * entry = APR_ARRAY_IDX(entries, i, char *);
+        // An entry is: Index Red Green Blue Alpha, white space separated
+        int idx = N * (apr_strtoi64(entry, &entry, 0) & 0xff);
+        if (errno)
+            return "Invalid entry format";
+        if (idx <= ix && !(ix == 0 && idx == 0))
+            return "Entries have to be sorted by index value";
+        for (int c = R; c <= A; c++) {
+            v[idx + c] = apr_strtoi64(entry, &entry, 0) & 0xff;
+            if (errno)
+                v[idx + c] = 0;
+        }
+        if (errno)
+            v[idx + A] = 0xff; // opaque by default
+
+        for (int j = ix + N; j < idx; j += N) { // Interpolate
+            double fraction = static_cast<double>(j - ix) / (idx - ix);
+            for (int c = R; c <= A; c++)
+                v[j + c] = static_cast<apr_byte_t>(0.5 + v[ix + c] 
+                    + fraction * (v[idx + c] - v[ix + c]));
+        }
+        ix = idx;
+    }
+    *len = ix / 4 + 1;
+    return nullptr;
+}
+
+static const char *configure(cmd_parms *cmd, png_conf *c, const char *fname)
+{
+    const char *err_message, *line;
+    auto kvp = readAHTSEConfig(cmd->temp_pool, fname, &err_message);
+    if (!kvp)
+        return err_message;
+    line = apr_table_get(kvp, "Palette");
+    if (line) {
+        line = apr_table_getm(cmd->temp_pool, kvp, "Entry");
+        if (!line)
+            return "Palette requires at least one Entry";
+        auto entries = tokenize(cmd->temp_pool, line, ',');
+        if (entries->nelts > 256)
+            return "Maximum number of entries is 256";
+        auto v = reinterpret_cast<apr_byte_t *>(
+            apr_pcalloc(cmd->temp_pool, 256 * 4));
+        int len = 0;
+        err_message = build_palette(entries, v, &len);
+        if (err_message)
+            return err_message;
+    }
+    return nullptr;
 }
 
 static int handler(request_rec *r) {
@@ -151,6 +211,14 @@ static const command_rec cmds[] = {
         (void *)APR_OFFSETOF(png_conf, indirect),
         ACCESS_CONF, // availability
         "If set, module only activates on subrequests"
+    )
+
+    ,AP_INIT_TAKE1(
+        "AHTSE_PNG_Configuration",
+        (cmd_func) configure,
+        0,
+        ACCESS_CONF,
+        "File holding the AHTSE_PNG configuration"
     )
 
     ,AP_INIT_FLAG(
