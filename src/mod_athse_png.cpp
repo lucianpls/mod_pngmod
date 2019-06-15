@@ -20,19 +20,24 @@ extern module AP_MODULE_DECLARE_DATA ahtse_png_module;
 enum { RED = 0, GREEN, BLUE, ALPHA };
 
 // PNG constants
-static const apr_byte_t PNGSIG[8] = { 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a };
+static const apr_byte_t PNGSIG[8] = { 0x89, 0x50, 0x4e, 0x47, 
+                                    0x0d, 0x0a, 0x1a, 0x0a };
+
 static const apr_byte_t IHDR[4] = { 0x49, 0x48, 0x44, 0x52 };
 static const apr_byte_t PLTE[4] = { 0x50, 0x4c, 0x54, 0x45 };
 static const apr_byte_t tRNS[4] = { 0x74, 0x52, 0x4e, 0x53 };
 static const apr_byte_t IDAT[4] = { 0x49, 0x44, 0x41, 0x54 };
 static const apr_byte_t IEND[4] = { 0x49, 0x45, 0x4e, 0x44 };
 
-// Compares two u32, alignemnt and order insensitive
-static int is_same_u32(const apr_byte_t *chunk, const apr_byte_t *src) {
-    return chunk[0] == src[0] &&
-        chunk[1] == src[1] &&
-        chunk[2] == src[2] &&
-        chunk[3] == src[3];
+// Compares 4 bytes
+static int is_same_4(const apr_byte_t *s1, const apr_byte_t *s2) {
+    return s1[0] == s2[0] && s1[1] == s2[1] && 
+        s1[2] == s2[2] && s1[3] == s2[3];
+}
+
+// Compares 8 bytes
+static int is_same_8(const apr_byte_t *s1, const apr_byte_t *s2) {
+    return is_same_4(s1, s2) && is_same_4(s1 + 4, s2 + 4);
 }
 
 // PNG CRC implementation, slightly modified for C++ from zlib, single table
@@ -163,8 +168,9 @@ static apr_byte_t scan_byte(char **src, int base = 0) {
 }
 
 // Entries should be in the order of index values
+// v should be a 256 * 4 byte array
 // Index 0 defaults to 0 0 0 0
-static const char *build_palette(apr_array_header_t *entries, apr_byte_t *v, int *len)
+static const char *raw_palette(apr_array_header_t *entries, apr_byte_t *v, int *len)
 {
     int ix = 0; // previous index
     for (int i = 0; i < entries->nelts; i++) {
@@ -179,7 +185,8 @@ static const char *build_palette(apr_array_header_t *entries, apr_byte_t *v, int
             v[idx + c] = scan_byte(&entry);
             if (!entry) {
                 if (ALPHA != c)
-                    return "Entry parsing error, should be at least 4 space separated byte values";
+                    return "Entry parsing error, "
+                    "should be at least 4 space separated byte values";
                 v[idx + ALPHA] = 0xff;
             }
         }
@@ -221,7 +228,7 @@ static const char *configure(cmd_parms *cmd, png_conf *c, const char *fname)
         auto arr = reinterpret_cast<apr_byte_t *>(
             apr_pcalloc(cmd->temp_pool, 256 * 4));
         int len = 0;
-        err_message = build_palette(entries, arr, &len);
+        err_message = raw_palette(entries, arr, &len);
         if (err_message)
             return err_message;
 
@@ -292,7 +299,8 @@ static const command_rec cmds[] = {
         (cmd_func) set_source<png_conf>,
         0,
         ACCESS_CONF,
-        "Required, internal path for the source. Optional postfix is space separated"
+        "Required, internal path for the source. "
+        "Optional postfix is space separated"
     )
 
     ,AP_INIT_FLAG(
@@ -316,8 +324,8 @@ static const command_rec cmds[] = {
         (cmd_func) ap_set_flag_slot,
         (void *)APR_OFFSETOF(png_conf, only),
         ACCESS_CONF, // availability
-        "If set, non-png files are blocked and reported as warnings."
-        " Default is off, allowing them to be sent"
+        "If set, non-png files are blocked and reported as warnings. "
+        "Default is off, allowing them to be sent"
     )
 
     ,{NULL}
