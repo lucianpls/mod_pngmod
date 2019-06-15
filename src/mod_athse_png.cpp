@@ -209,8 +209,9 @@ static const char *configure(cmd_parms *cmd, png_conf *c, const char *fname)
     auto kvp = readAHTSEConfig(cmd->temp_pool, fname, &err_message);
     if (!kvp)
         return err_message;
+
     line = apr_table_get(kvp, "Palette");
-    if (line) {
+    if (line) {     // Build precomputed PNG PLTE and tRNS chunks
         line = apr_table_getm(cmd->temp_pool, kvp, "Entry");
         if (!line)
             return "Palette requires at least one Entry";
@@ -223,29 +224,36 @@ static const char *configure(cmd_parms *cmd, png_conf *c, const char *fname)
         err_message = build_palette(entries, arr, &len);
         if (err_message)
             return err_message;
-        // Allocate and convert
-        auto chunk_PLTE = reinterpret_cast<apr_byte_t *>(apr_pcalloc(cmd->pool, 3 * len + 12));
-        poke_u32be(chunk_PLTE, 3 * len);
-        poke_u32be(chunk_PLTE + 4, peek_u32be(PLTE));
-        apr_byte_t *p = chunk_PLTE + 8;
+
+        // build PLTE chunk
+        auto chunk = reinterpret_cast<apr_byte_t *>(
+            apr_pcalloc(cmd->pool, 3 * len + 12));
+        poke_u32be(chunk, 3 * len);
+        poke_u32be(chunk + 4, peek_u32be(PLTE));
+        apr_byte_t *p = chunk + 8;
         for (int i = 0; i < len * 4; i += 4)
             for (int c = RED; c < ALPHA; c++)
                 *p++ = arr[i * 4 + c];
-        poke_u32be(chunk_PLTE + 3 * len + 8, crc32(chunk_PLTE + 4, 3 * len + 4));
-        c->chunk_PLTE = chunk_PLTE;
+        poke_u32be(chunk + 3 * len + 8,
+            crc32(chunk + 4, 3 * len + 4));
+        c->chunk_PLTE = chunk;
+
         // Same for the tRNS, if needed
         int tlen = tRNSlen(arr, len);
         if (tlen) {
-            auto chunk_tRNS = reinterpret_cast<apr_byte_t *>(apr_pcalloc(cmd->pool, tlen + 12));
-            poke_u32be(chunk_tRNS, tlen);
-            poke_u32be(chunk_tRNS + 4, peek_u32be(tRNS));
-            apr_byte_t *p = chunk_tRNS + 8;
+            chunk = reinterpret_cast<apr_byte_t *>(
+                apr_pcalloc(cmd->pool, tlen + 12));
+            poke_u32be(chunk, tlen);
+            poke_u32be(chunk + 4, peek_u32be(tRNS));
+            apr_byte_t *p = chunk + 8;
             for (int i = 0; i < tlen; i++)
                 *p++ = arr[i * 4 + ALPHA];
-            poke_u32be(chunk_PLTE + 3 * len + 8, crc32(chunk_PLTE + 4, len + 4));
-            c->chunk_tRNS = chunk_tRNS;
+            poke_u32be(chunk + 3 * len + 8,
+                crc32(chunk + 4, len + 4));
+            c->chunk_tRNS = chunk;
         }
-    }
+    } // Build PLTE and tRNS chunks
+
     return nullptr;
 }
 
