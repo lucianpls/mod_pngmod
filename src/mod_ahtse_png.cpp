@@ -7,7 +7,7 @@
  */
 
 #include <ahtse.h>
-// #include <cctype>
+#include <cctype>
 #include <receive_context.h>
 #include <http_request.h>
 #include <http_protocol.h>
