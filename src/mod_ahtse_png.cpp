@@ -558,14 +558,20 @@ static int handler(request_rec *r) {
             // Send stuf f that goes before IDAT, in the proper order
 
             if (use_outbuf) {
-                memcpy(outbuf.buffer + outbuf.size, cfg->chunk_PLTE, chunk_len(cfg->chunk_PLTE));
-                outbuf.size += chunk_len(cfg->chunk_PLTE);
-                memcpy(outbuf.buffer + outbuf.size, cfg->chunk_tRNS, chunk_len(cfg->chunk_tRNS));
-                outbuf.size += chunk_len(cfg->chunk_tRNS);
+                if (send_PLTE) {
+                    memcpy(outbuf.buffer + outbuf.size, cfg->chunk_PLTE, chunk_len(cfg->chunk_PLTE));
+                    outbuf.size += chunk_len(cfg->chunk_PLTE);
+                }
+                if (send_tRNS) {
+                    memcpy(outbuf.buffer + outbuf.size, cfg->chunk_tRNS, chunk_len(cfg->chunk_tRNS));
+                    outbuf.size += chunk_len(cfg->chunk_tRNS);
+                }
             }
             else {
-                ap_rwrite(cfg->chunk_PLTE, chunk_len(cfg->chunk_PLTE), r);
-                ap_rwrite(cfg->chunk_tRNS, chunk_len(cfg->chunk_tRNS), r);
+                if (send_PLTE)
+                    ap_rwrite(cfg->chunk_PLTE, chunk_len(cfg->chunk_PLTE), r);
+                if (send_tRNS)
+                    ap_rwrite(cfg->chunk_tRNS, chunk_len(cfg->chunk_tRNS), r);
             }
 
             seen_IDAT = true;
