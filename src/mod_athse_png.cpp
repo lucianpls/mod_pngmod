@@ -25,6 +25,7 @@ APLOG_USE_MODULE(ahtse_png);
 
 // Colors, anonymous enum
 enum { RED = 0, GREEN, BLUE, ALPHA, BANDS };
+enum PG_TYPE { LUMA = 0, RGB = 2, INDEX = 3, LA = 4, RGBA = 6};
 
 // PNG constants
 static const apr_byte_t PNGSIG[8] = { 0x89, 0x50, 0x4e, 0x47, 
@@ -139,6 +140,10 @@ static apr_uint32_t peek_u32be(const apr_byte_t *src) {
         (static_cast<apr_uint32_t>(src[3]));
 }
 
+static bool is_chunk(const apr_byte_t *HSIG, void *buff) {
+    return is_same_4(HSIG, reinterpret_cast<apr_byte_t *>(buff) + 4);
+}
+
 // Find the n-th PNG chunk with a specific signature
 // assumes the file signature was already checked
 // return null on failure
@@ -150,16 +155,17 @@ static apr_byte_t *find_chunk(const apr_byte_t *HSIG,
     int off = 8; // How far we got
     apr_byte_t *p = reinterpret_cast<apr_byte_t *>(mgr.buffer); // First chunk
     while (off + MIN_C_LEN <= mgr.size) { // Need at least LEN + SIG + CHECKSUM
-        if (is_same_4(HSIG, p + off + 4) && (0 == --occurence))
-            return p + off; // Found it
+        apr_byte_t *chunk = p + off;
+        if (is_chunk(HSIG, chunk) && (0 == --occurence))
+            return chunk; // Found it
         // Skip this chunk
-        off += MIN_C_LEN + peek_u32be(p + off);
+        off += MIN_C_LEN + peek_u32be(chunk);
     }
     return nullptr;
 }
 
 static apr_byte_t *next_chunk(apr_byte_t *chunk) {
-    if (is_same_4(chunk + 4, IEND))
+    if (is_chunk(IEND, chunk))
         return nullptr; // No chunk past the end one
     apr_uint32_t len = peek_u32be(chunk);
     return chunk + 12 + len;
@@ -263,6 +269,9 @@ static const char *configure(cmd_parms *cmd, png_conf *c, const char *fname)
         return err_message;
 
     err_message = configRaster(cmd->pool, kvp, c->raster);
+    if (err_message)
+        return err_message;
+
     line = apr_table_get(kvp, "Palette");
     if (line) {     // Build precomputed PNG PLTE and tRNS chunks
         line = apr_table_getm(cmd->temp_pool, kvp, "Entry");
@@ -346,8 +355,10 @@ static int get_tile(request_rec *r, const char *remote, sloc_t tile,
     char *sub_uri = apr_pstrcat(r->pool, remote, "/tile", stile, postfix, NULL);
     request_rec *sr = ap_sub_req_lookup_uri(sub_uri, r, r->output_filters);
     ap_filter_t *rf = ap_add_output_filter_handle(receive_filter, &rctx, sr, sr->connection);
-    int code = ap_run_sub_req(sr); // returns http code
+    int code = ap_run_sub_req(sr); // returns call status
+    int status = sr->status;       // http code
     dst.size = rctx.size;
+
     const char *sETag = apr_table_get(sr->headers_out, "ETag");
 
     if (psETag && sETag)
@@ -356,10 +367,10 @@ static int get_tile(request_rec *r, const char *remote, sloc_t tile,
     ap_remove_output_filter(rf);
     ap_destroy_sub_req(sr);
 
-    if (code == APR_SUCCESS)
+    if (code == APR_SUCCESS && status == HTTP_OK)
         return APR_SUCCESS;
-    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "%s failed, %d", sub_uri, code);
-    return code;
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "%s failed, %d", sub_uri, status);
+    return status;
 }
 
 static int handler(request_rec *r) {
@@ -425,41 +436,96 @@ static int handler(request_rec *r) {
 
     apr_uint32_t len = peek_u32be(pIHDR);
     if (len != 13) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Bogus IHDR chunk, %s", r->uri);
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Bogus IHDR chunk, from %s", r->uri);
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    // Adjust the png here, in tilebuf, which is cfg->raster.maxtilesize in size
+    const int IHDR_ctype = 8 + 9;
+    PG_TYPE ctype = PG_TYPE(pIHDR[IHDR_ctype]);
 
-    apr_byte_t ctype = pIHDR[9];
-    if (cfg->chunk_PLTE) {
-        apr_byte_t *pPLTE = find_chunk(PLTE, tilebuf);
-        if (ctype == 0 || ctype == 3) {
-            if (!find_chunk(PLTE, tilebuf)) {
-                pPLTE = find_chunk(tRNS, tilebuf);
-                if (!pPLTE)
-                    pPLTE = find_chunk(IDAT, tilebuf);
-            }
-            else { // Remove the old palette
-                len = peek_u32be(pPLTE);
-                memmove(pPLTE, pPLTE + len, 
-                    (tilebuf.buffer + tilebuf.size) - reinterpret_cast<char *>(pPLTE + len));
-                tilebuf.size -= len;
-            }
-        }
-        else {
-            // Can't add palette to other types
-        }
+    // Figure out the size, adjust existing chunks
+    int outlen = tilebuf.size;
+    apr_byte_t *chunk = nullptr;
 
-        //Make space and insert the new palette
-        len = peek_u32be(cfg->chunk_PLTE);
-        memmove(pPLTE + len, pPLTE, 
-            (tilebuf.buffer + tilebuf.size) - reinterpret_cast<char *>(pPLTE));
-        memmove(pPLTE, cfg->chunk_PLTE, len);
-        tilebuf.buffer += len;
+    // Subtraction
+    if (cfg->chunk_PLTE && (ctype == LUMA || ctype == INDEX)) { // palette replacement or removal
+        chunk = find_chunk(PLTE, tilebuf);
+        if (chunk)
+            outlen -= 12 + peek_u32be(chunk);
+        chunk = find_chunk(tRNS, tilebuf); // Remove the old chunk too
+        if (chunk)
+            outlen -= 12 + peek_u32be(chunk);
     }
 
-    return sendImage(r, tilebuf); // Maybe this could warn?
+    // Additions
+    // if size of chunk_PLTE is 0, no PLTE chunk is emitted
+    bool send_PLTE = false;
+    if (cfg->chunk_PLTE) {
+        len = peek_u32be(cfg->chunk_PLTE);
+        if (len) {
+            if (ctype == LUMA) { // Was grayscale
+                ctype = INDEX; // Force palette
+                chunk = find_chunk(IHDR, tilebuf);
+                chunk[IHDR_ctype] = ctype;
+            }
+
+            if (ctype == INDEX) {
+                send_PLTE = true;
+                outlen += 12 + len;
+            }
+        }
+        else { // Removing the existing palette, becomes grayscale
+            if (ctype == INDEX) {
+                ctype = LUMA;
+                chunk = find_chunk(IHDR, tilebuf);
+                chunk[IHDR_ctype] = ctype;
+            }
+        }
+    }
+
+    bool send_tRNS = false;
+    if (cfg->chunk_tRNS) {
+        len = peek_u32be(cfg->chunk_tRNS);
+        // Don't care about the type, assume tRNS is the right format
+        if (len) {
+            outlen += 12 + len;
+            send_tRNS = true;
+        }
+    }
+
+    // Got the size right, set it
+    ap_set_content_type(r, "image/png");
+//    ap_set_content_length(r, static_cast<apr_off_t>(outlen));
+
+    // Send out the chunks, in the proper order
+    ap_rwrite(tilebuf.buffer, 8, r);
+    chunk = reinterpret_cast<apr_byte_t *>(tilebuf.buffer) + 8;
+    bool seen_IDAT = false;
+
+    do {
+        // remove or replace the palette or tRNS
+        if (cfg->chunk_PLTE && is_chunk(PLTE, chunk))
+            continue;         
+        if (cfg->chunk_tRNS && is_chunk(tRNS, chunk))
+            continue;
+
+        if (!seen_IDAT && is_chunk(IDAT, chunk)) {
+
+            // Send stuff that goes before IDAT, in the proper order
+#define COND_SEND(CHUNK) if (send_##CHUNK##) \
+            ap_rwrite(cfg->chunk_##CHUNK##, 12 + peek_u32be(cfg->chunk_##CHUNK##), r)
+
+            COND_SEND(PLTE);
+            COND_SEND(tRNS);
+
+#undef COND_SEND
+
+            seen_IDAT = true;
+        }
+        ap_rwrite(chunk, 12 + peek_u32be(chunk), r); // Send the chunk as is
+    } while (chunk = next_chunk(chunk));
+
+    return OK;
 }
 
 static void register_hooks(apr_pool_t *p) {
