@@ -7,8 +7,11 @@
  */
 
 #include <ahtse.h>
+// #include <cctype>
 #include <receive_context.h>
-#include <cctype>
+#include <http_request.h>
+#include <http_protocol.h>
+#include <http_log.h>
 
 using namespace std;
 
@@ -16,8 +19,12 @@ NS_AHTSE_USE
 
 extern module AP_MODULE_DECLARE_DATA ahtse_png_module;
 
+#if defined(APLOG_USE_MODULE)
+APLOG_USE_MODULE(ahtse_png);
+#endif
+
 // Colors, anonymous enum
-enum { RED = 0, GREEN, BLUE, ALPHA };
+enum { RED = 0, GREEN, BLUE, ALPHA, BANDS };
 
 // PNG constants
 static const apr_byte_t PNGSIG[8] = { 0x89, 0x50, 0x4e, 0x47, 
@@ -28,6 +35,11 @@ static const apr_byte_t PLTE[4] = { 0x50, 0x4c, 0x54, 0x45 };
 static const apr_byte_t tRNS[4] = { 0x74, 0x52, 0x4e, 0x53 };
 static const apr_byte_t IDAT[4] = { 0x49, 0x44, 0x41, 0x54 };
 static const apr_byte_t IEND[4] = { 0x49, 0x45, 0x4e, 0x44 };
+
+// PNG chunk structrure is
+//LEN + SIG + (DATA) + CHECKSUM
+//LEN is length of DATA, 0 is valid
+// Thus an empty chunk takes at least 12 bytes
 
 // Compares 4 bytes
 static int is_same_4(const apr_byte_t *s1, const apr_byte_t *s2) {
@@ -105,6 +117,12 @@ static apr_uint32_t update_crc32(unsigned char *buf, int len,
     return val;
 }
 
+// The transmitted value is 1's complement
+static apr_uint32_t crc32(unsigned char *buf, int len)
+{
+    return update_crc32(buf, len) ^ 0xffffffff;
+}
+
 // PNG values are always big endian
 static void poke_u32be(apr_byte_t *dst, apr_uint32_t val) {
     dst[0] = static_cast<apr_byte_t>((val >> 24) & 0xff);
@@ -121,14 +139,36 @@ static apr_uint32_t peek_u32be(const apr_byte_t *src) {
         (static_cast<apr_uint32_t>(src[3]));
 }
 
-// The transmitted value is 1's complement
-static apr_uint32_t crc32(unsigned char *buf, int len)
+// Find the n-th PNG chunk with a specific signature
+// assumes the file signature was already checked
+// return null on failure
+
+static apr_byte_t *find_chunk(const apr_byte_t *HSIG, 
+    storage_manager &mgr, int occurence = 1)
 {
-    return update_crc32(buf, len) ^ 0xffffffff;
+    static const int MIN_C_LEN = 12;
+    int off = 8; // How far we got
+    apr_byte_t *p = reinterpret_cast<apr_byte_t *>(mgr.buffer); // First chunk
+    while (off + MIN_C_LEN <= mgr.size) { // Need at least LEN + SIG + CHECKSUM
+        if (is_same_4(HSIG, p + off + 4) && (0 == --occurence))
+            return p + off; // Found it
+        // Skip this chunk
+        off += MIN_C_LEN + peek_u32be(p + off);
+    }
+    return nullptr;
+}
+
+static apr_byte_t *next_chunk(apr_byte_t *chunk) {
+    if (is_same_4(chunk + 4, IEND))
+        return nullptr; // No chunk past the end one
+    apr_uint32_t len = peek_u32be(chunk);
+    return chunk + 12 + len;
 }
 
 struct png_conf {
     apr_array_header_t *arr_rxp;
+    // Raster Configuration, mostly ignored
+    TiledRaster raster;
     int indirect;        // Subrequests only
     int only;            // Block non-pngs
     char *source;        // source path
@@ -181,7 +221,7 @@ static const char *raw_palette(apr_array_header_t *entries, apr_byte_t *v, int *
             return "Invalid entry format";
         if (idx <= ix && !(ix == 0 && idx == 0))
             return "Entries have to be sorted by index value";
-        for (int c = RED; c <= ALPHA; c++) {
+        for (int c = RED; c < BANDS; c++) {
             v[idx + c] = scan_byte(&entry);
             if (!entry) {
                 if (ALPHA != c)
@@ -193,7 +233,7 @@ static const char *raw_palette(apr_array_header_t *entries, apr_byte_t *v, int *
 
         for (int j = ix + 4; j < idx; j += 4) { // Interpolate
             double fraction = static_cast<double>(j - ix) / (idx - ix);
-            for (int c = RED; c <= ALPHA; c++)
+            for (int c = RED; c < BANDS; c++)
                 v[j + c] = static_cast<apr_byte_t>(0.5 + v[ix + c] 
                     + fraction * (v[idx + c] - v[ix + c]));
         }
@@ -205,9 +245,14 @@ static const char *raw_palette(apr_array_header_t *entries, apr_byte_t *v, int *
 
 // returns the number of entries in the tRNS
 static int tRNSlen(const apr_byte_t *arr, int len) {
-    while (len && arr[(len - 1) * 4 + ALPHA] == 255)
+    while (len && 0xff == arr[(len - 1) * BANDS + ALPHA])
         len--;
     return len;
+}
+
+static apr_uint32_t get_crc(apr_byte_t *chunk) {
+    apr_uint32_t len = peek_u32be(chunk);
+    return peek_u32be(chunk + len + 8); // Last 4 bytes
 }
 
 static const char *configure(cmd_parms *cmd, png_conf *c, const char *fname)
@@ -217,6 +262,7 @@ static const char *configure(cmd_parms *cmd, png_conf *c, const char *fname)
     if (!kvp)
         return err_message;
 
+    err_message = configRaster(cmd->pool, kvp, c->raster);
     line = apr_table_get(kvp, "Palette");
     if (line) {     // Build precomputed PNG PLTE and tRNS chunks
         line = apr_table_getm(cmd->temp_pool, kvp, "Entry");
@@ -226,7 +272,7 @@ static const char *configure(cmd_parms *cmd, png_conf *c, const char *fname)
         if (entries->nelts > 256)
             return "Maximum number of entries is 256";
         auto arr = reinterpret_cast<apr_byte_t *>(
-            apr_pcalloc(cmd->temp_pool, 256 * 4));
+            apr_pcalloc(cmd->temp_pool, 256 * BANDS));
         int len = 0;
         err_message = raw_palette(entries, arr, &len);
         if (err_message)
@@ -238,9 +284,9 @@ static const char *configure(cmd_parms *cmd, png_conf *c, const char *fname)
         poke_u32be(chunk, 3 * len);
         poke_u32be(chunk + 4, peek_u32be(PLTE));
         apr_byte_t *p = chunk + 8;
-        for (int i = 0; i < len * 4; i += 4)
+        for (int i = 0; i < len * BANDS; i += 4)
             for (int c = RED; c < ALPHA; c++)
-                *p++ = arr[i * 4 + c];
+                *p++ = arr[i * BANDS + c];
         poke_u32be(chunk + 3 * len + 8,
             crc32(chunk + 4, 3 * len + 4));
         c->chunk_PLTE = chunk;
@@ -254,14 +300,66 @@ static const char *configure(cmd_parms *cmd, png_conf *c, const char *fname)
             poke_u32be(chunk + 4, peek_u32be(tRNS));
             apr_byte_t *p = chunk + 8;
             for (int i = 0; i < tlen; i++)
-                *p++ = arr[i * 4 + ALPHA];
+                *p++ = arr[i * BANDS + ALPHA];
             poke_u32be(chunk + 3 * len + 8,
                 crc32(chunk + 4, len + 4));
             c->chunk_tRNS = chunk;
         }
     } // Build PLTE and tRNS chunks
 
+    // If we have a missing file but no ETAg, use the palette chunk sig
+    if (c->raster.missing.data.buffer && c->raster.missing.eTag[0] == 0 && c->chunk_PLTE) {
+        c->raster.seed = get_crc(c->chunk_PLTE);
+        c->raster.seed *= (c->chunk_tRNS) ? get_crc(c->chunk_tRNS) : 0xb1e2473a; // mix the bits
+        tobase32(c->raster.seed, c->raster.missing.eTag, 1);
+    }
+
     return nullptr;
+}
+
+// Tile address should already be adjusted for skipped levels, 
+// and within source raster bounds
+// returns success or remote code
+static int get_tile(request_rec *r, const char *remote, sloc_t tile,
+    storage_manager &dst, char **psETag = NULL, const char * postfix = NULL)
+{
+    ap_filter_rec_t *receive_filter = ap_get_output_filter_handle("Receive");
+    if (!receive_filter) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+            "Can't find receive filter, did you load mod_receive?");
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    receive_ctx rctx;
+    rctx.buffer = dst.buffer;
+    rctx.maxsize = dst.size;
+    rctx.size = 0;
+    char *stile = apr_psprintf(r->pool, "/%d/%d/%d/%d",
+        static_cast<int>(tile.z),
+        static_cast<int>(tile.l),
+        static_cast<int>(tile.y),
+        static_cast<int>(tile.x));
+
+    if (stile[1] == '0') // Don't send the M if zero
+        stile += 2;
+
+    char *sub_uri = apr_pstrcat(r->pool, remote, "/tile", stile, postfix, NULL);
+    request_rec *sr = ap_sub_req_lookup_uri(sub_uri, r, r->output_filters);
+    ap_filter_t *rf = ap_add_output_filter_handle(receive_filter, &rctx, sr, sr->connection);
+    int code = ap_run_sub_req(sr); // returns http code
+    dst.size = rctx.size;
+    const char *sETag = apr_table_get(sr->headers_out, "ETag");
+
+    if (psETag && sETag)
+        *psETag = apr_pstrdup(r->pool, sETag);
+
+    ap_remove_output_filter(rf);
+    ap_destroy_sub_req(sr);
+
+    if (code == APR_SUCCESS)
+        return APR_SUCCESS;
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "%s failed, %d", sub_uri, code);
+    return code;
 }
 
 static int handler(request_rec *r) {
@@ -278,7 +376,90 @@ static int handler(request_rec *r) {
     if (APR_SUCCESS != getMLRC(r, tile))
         return HTTP_BAD_REQUEST;
 
-    return DECLINED;
+    char *sETag = NULL;
+    storage_manager tilebuf;
+    tilebuf.size = cfg->raster.maxtilesize;
+    tilebuf.buffer = static_cast<char *>(apr_palloc(r->pool, tilebuf.size));
+    if (!tilebuf.buffer) {
+        ap_log_rerror(APLOG_MARK, APLOG_CRIT, 0, r, "Out of memory");
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    int code = get_tile(r, cfg->source, tile, tilebuf, &sETag);
+    if (APR_SUCCESS != code)
+        return code;
+
+    // SIG + IHDR + IDAT + data + IEND == 58
+    const static int MIN_PNG_SZ = 8 + 25 + 12 + 1 + 12;
+    if (tilebuf.size < MIN_PNG_SZ) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Input data too small %s", r->uri);
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    // Got the tile, first check or build the ETag
+    int is_empty;
+    apr_uint64_t nETag = base32decode(sETag, &is_empty);
+    if (is_empty)
+        return sendEmptyTile(r, cfg->raster.missing);
+
+    char ETag[16]; // Outgoing ETag
+    tobase32(cfg->raster.seed ^ nETag, ETag);
+    if (etagMatches(r, ETag)) {
+        apr_table_set(r->headers_out, "ETag", ETag);
+        return HTTP_NOT_MODIFIED;
+    }
+
+    if (!is_same_8(reinterpret_cast<apr_byte_t *>(tilebuf.buffer), PNGSIG)) {
+        if (!cfg->only)
+            return sendImage(r, tilebuf);
+        else
+            return sendEmptyTile(r, cfg->raster.missing);
+    }
+
+    // If is PNG, is it the right kind ?
+    const apr_byte_t *pIHDR = find_chunk(IHDR, tilebuf);
+    if (!pIHDR || pIHDR != reinterpret_cast<apr_byte_t *>(tilebuf.buffer + 8)) {  // Borken PNG?
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Input PNG is corrupt %s", r->uri);
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    apr_uint32_t len = peek_u32be(pIHDR);
+    if (len != 13) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Bogus IHDR chunk, %s", r->uri);
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    // Adjust the png here, in tilebuf, which is cfg->raster.maxtilesize in size
+
+    apr_byte_t ctype = pIHDR[9];
+    if (cfg->chunk_PLTE) {
+        apr_byte_t *pPLTE = find_chunk(PLTE, tilebuf);
+        if (ctype == 0 || ctype == 3) {
+            if (!find_chunk(PLTE, tilebuf)) {
+                pPLTE = find_chunk(tRNS, tilebuf);
+                if (!pPLTE)
+                    pPLTE = find_chunk(IDAT, tilebuf);
+            }
+            else { // Remove the old palette
+                len = peek_u32be(pPLTE);
+                memmove(pPLTE, pPLTE + len, 
+                    (tilebuf.buffer + tilebuf.size) - reinterpret_cast<char *>(pPLTE + len));
+                tilebuf.size -= len;
+            }
+        }
+        else {
+            // Can't add palette to other types
+        }
+
+        //Make space and insert the new palette
+        len = peek_u32be(cfg->chunk_PLTE);
+        memmove(pPLTE + len, pPLTE, 
+            (tilebuf.buffer + tilebuf.size) - reinterpret_cast<char *>(pPLTE));
+        memmove(pPLTE, cfg->chunk_PLTE, len);
+        tilebuf.buffer += len;
+    }
+
+    return sendImage(r, tilebuf); // Maybe this could warn?
 }
 
 static void register_hooks(apr_pool_t *p) {
