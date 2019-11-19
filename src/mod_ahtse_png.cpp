@@ -183,7 +183,7 @@ struct png_conf {
     int indirect;        // Subrequests only
     int only;            // Block non-pngs
     char *source;        // source path
-    char *postfix;       // optional postfix
+    char *suffix;       // optional postfix
     apr_byte_t *chunk_PLTE;    // the PLTE chunk
     apr_byte_t *chunk_tRNS;    // the tRNS chunk
 };
@@ -417,8 +417,11 @@ static int handler(request_rec *r) {
     // Got the tile, first check or build the ETag
     int is_empty;
     apr_uint64_t nETag = base32decode(sETag, &is_empty);
-    if (is_empty)
-        return sendEmptyTile(r, cfg->raster.missing);
+
+    //
+    // This module doesn't explicitly support missing tile
+    // if (is_empty) return sendEmptyTile(r, cfg->raster.missing);
+    //
 
     char ETag[16]; // Outgoing ETag
     tobase32(cfg->raster.seed ^ nETag, ETag);
