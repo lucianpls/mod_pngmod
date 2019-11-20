@@ -183,7 +183,7 @@ struct png_conf {
     int indirect;        // Subrequests only
     int only;            // Block non-pngs
     char *source;        // source path
-    char *suffix;       // optional postfix
+    char *suffix;        // optional
     apr_byte_t *chunk_PLTE;    // the PLTE chunk
     apr_byte_t *chunk_tRNS;    // the tRNS chunk
 };
@@ -335,7 +335,7 @@ static const char *configure(cmd_parms *cmd, png_conf *c, const char *fname)
 // and within source raster bounds
 // returns success or remote code
 static int get_tile(request_rec *r, const char *remote, sloc_t tile,
-    storage_manager &dst, char **psETag = NULL, const char * postfix = NULL)
+    storage_manager &dst, char **psETag = NULL, const char * suffix = NULL)
 {
     ap_filter_rec_t *receive_filter = ap_get_output_filter_handle("Receive");
     if (!receive_filter) {
@@ -357,7 +357,7 @@ static int get_tile(request_rec *r, const char *remote, sloc_t tile,
     if (stile[1] == '0') // Don't send the M if zero
         stile += 2;
 
-    char *sub_uri = apr_pstrcat(r->pool, remote, "/tile", stile, postfix, NULL);
+    char *sub_uri = apr_pstrcat(r->pool, remote, "/tile", stile, suffix, NULL);
     request_rec *sr = ap_sub_req_lookup_uri(sub_uri, r, r->output_filters);
     ap_filter_t *rf = ap_add_output_filter_handle(receive_filter, &rctx, sr, sr->connection);
     int code = ap_run_sub_req(sr); // returns call status
@@ -418,11 +418,6 @@ static int handler(request_rec *r) {
     int is_empty;
     apr_uint64_t nETag = base32decode(sETag, &is_empty);
 
-    //
-    // This module doesn't explicitly support missing tile
-    // if (is_empty) return sendEmptyTile(r, cfg->raster.missing);
-    //
-
     char ETag[16]; // Outgoing ETag
     tobase32(cfg->raster.seed ^ nETag, ETag);
     if (etagMatches(r, ETag)) {
@@ -439,7 +434,8 @@ static int handler(request_rec *r) {
 
     // If is PNG, is it the right kind ?
     apr_byte_t *pIHDR = find_chunk(IHDR, tilebuf);
-    if (!pIHDR || pIHDR != reinterpret_cast<apr_byte_t *>(tilebuf.buffer + 8)) {  // Borken PNG?
+    if (!pIHDR || pIHDR != reinterpret_cast<apr_byte_t *>(tilebuf.buffer + 8)) {
+        // Borken input PNG?
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Input PNG is corrupt %s", r->uri);
         return HTTP_INTERNAL_SERVER_ERROR;
     }
@@ -450,12 +446,6 @@ static int handler(request_rec *r) {
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    //else { // Check the sum
-    //    apr_uint32_t oldsum = peek_u32be(pIHDR + 8 + len);
-    //    apr_uint32_t newsum = crc32(reinterpret_cast<unsigned char *>(pIHDR) + 4, len + 4);
-    //    oldsum -= newsum;
-    //}
-
     // Offset of PNG color type
     const int IHDR_ctype = 8 + 9;
     PG_TYPE ctype = PG_TYPE(pIHDR[IHDR_ctype]);
@@ -465,7 +455,8 @@ static int handler(request_rec *r) {
     apr_byte_t *chunk = nullptr;
 
     // Subtractions
-    if (cfg->chunk_PLTE && (ctype == LUMA || ctype == PIDX)) { // palette replacement or removal
+    if (cfg->chunk_PLTE && (ctype == LUMA || ctype == PIDX)) {
+        // palette replacement or removal
         chunk = find_chunk(PLTE, tilebuf);
         if (chunk)
             outlen -= chunk_len(chunk);
@@ -522,78 +513,38 @@ static int handler(request_rec *r) {
 
     apr_table_set(r->headers_out, "ETag", ETag);
 
-    // The two paths defined by this variable should be the same, 
-    // but for some reason using ap_rwrite multiple times (chunked)
-    // seems to stall, at least under the windows debugger, except if extra sleep is added in the send chunk
-    // loop
-    bool use_outbuf = true;
-    // Not sure why it stalls when called the wrong way, maybe because it's from different pools
-    storage_manager outbuf;
-    outbuf.size = outlen;
-    outbuf.buffer = reinterpret_cast<char *>(apr_palloc(r->pool, outlen));
-
-    // Got the size right, set it
-    if (use_outbuf) {
-        memcpy(outbuf.buffer, tilebuf.buffer, 8);
-        outbuf.size = 8;
-    }
-    else {
-        ap_set_content_type(r, "image/png");
-        ap_set_content_length(r, static_cast<apr_off_t>(outlen));
-        // Send out the chunks, in the proper order
-        ap_rwrite(tilebuf.buffer, 8, r);
-    }
-    len = 8;
-
-    chunk = reinterpret_cast<apr_byte_t *>(tilebuf.buffer) + 8;
-
+    ap_set_content_type(r, "image/png");
+    ap_set_content_length(r, static_cast<apr_off_t>(outlen));
+    // Send out the chunks, in the proper order, remember to flush!
+    ap_rwrite(tilebuf.buffer, 8, r);
 
     bool seen_IDAT = false;
+    for (chunk = reinterpret_cast<apr_byte_t *>(tilebuf.buffer) + 8;
+        chunk; chunk = next_chunk(chunk)) {
 
-    while(chunk) {
         // remove or replace the palette and tRNS
         if (cfg->chunk_PLTE && is_chunk(PLTE, chunk))
-            continue;         
+            continue;
         if (cfg->chunk_tRNS && is_chunk(tRNS, chunk))
             continue;
 
         if ((!seen_IDAT) && is_chunk(IDAT, chunk)) {
-            // Send stuf f that goes before IDAT, in the proper order
-
-            if (use_outbuf) {
-                if (send_PLTE) {
-                    memcpy(outbuf.buffer + outbuf.size, cfg->chunk_PLTE, chunk_len(cfg->chunk_PLTE));
-                    outbuf.size += chunk_len(cfg->chunk_PLTE);
-                }
-                if (send_tRNS) {
-                    memcpy(outbuf.buffer + outbuf.size, cfg->chunk_tRNS, chunk_len(cfg->chunk_tRNS));
-                    outbuf.size += chunk_len(cfg->chunk_tRNS);
-                }
-            }
-            else {
-                if (send_PLTE)
-                    ap_rwrite(cfg->chunk_PLTE, chunk_len(cfg->chunk_PLTE), r);
-                if (send_tRNS)
-                    ap_rwrite(cfg->chunk_tRNS, chunk_len(cfg->chunk_tRNS), r);
-            }
-
             seen_IDAT = true;
+            if (send_PLTE) {
+                ap_rwrite(cfg->chunk_PLTE, chunk_len(cfg->chunk_PLTE), r);
+                len += chunk_len(cfg->chunk_PLTE);
+            }
+            if (send_tRNS) {
+                ap_rwrite(cfg->chunk_tRNS, chunk_len(cfg->chunk_tRNS), r);
+                len += chunk_len(cfg->chunk_tRNS);
+            }
         }
-        len += chunk_len(chunk);
-        if (use_outbuf) {
-            memcpy(outbuf.buffer + outbuf.size, chunk, chunk_len(chunk));
-            outbuf.size += chunk_len(chunk);
-        }
-        else {
-            ap_rwrite(chunk, chunk_len(chunk), r);
-        }
-        chunk = next_chunk(chunk);
+        // Send the current input chunk
+        ap_rwrite(chunk, chunk_len(chunk), r);
     }
 
-    if (use_outbuf)
-        return sendImage(r, outbuf);
-
-//    ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Sent Modified PNG");
+    ap_rflush(r);
+    //ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Sent Modified PNG");
     return OK;
 }
 
@@ -616,7 +567,7 @@ static const command_rec cmds[] = {
         0,
         ACCESS_CONF,
         "Required, internal path for the source. "
-        "Optional postfix is space separated"
+        "Optional suffix is space separated"
     )
 
     ,AP_INIT_FLAG(
