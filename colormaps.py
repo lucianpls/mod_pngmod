@@ -1066,16 +1066,20 @@ cmaps = {
     'viridis' : _viridis_data
 }
 
-thismap = _viridis_data
 
-def topalette(data, values = 256):
-    indices = (int(n * 255 / (values - 1)) for n in range(values))
-    return tuple(tuple(int(thismap[i][c] * 255) for c in range(3)) for i in indices)
+def entries(data, begin = 0, end = 256):
+    '''Generate color palette entries to be used in mod_ahtse_png configuration.
+The begin and end parameters can be used to pack the color palette into a specific entry index range'''
 
-def entries(palette):
-    indices = tuple(int(n * 255 / (len(palette) - 1)) for n in range(len(palette)))
-    return (f"Entry {indices[i]} {palette[i][0]} {palette[i][1]} {palette[i][2]}" for i in range(len(palette)))
+    def topalette(data, indices):
+        'Convert from matlab palette input to byte RGB'
+        return (tuple(int(data[i][c] * 255 + 0.5) for c in range(3)) for i in indices)
+
+    values = end - begin
+    indices = tuple(int(n * 255 / (values - 1)) for n in range(values))
+    palette = tuple(topalette(data, indices))
+    return (f"Entry {i + begin} {palette[i][0]} {palette[i][1]} {palette[i][2]}" for i in range(values))
 
 # To generate the entries required for mod_ahtse_png, use something like this
-# for line in entries(topalette(cmaps['viridis'], 256)):
-#    print(line)
+for line in entries(cmaps['magma'], 173):
+   print(line)
