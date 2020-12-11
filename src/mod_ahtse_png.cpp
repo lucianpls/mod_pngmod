@@ -194,11 +194,6 @@ static void *create_dir_config(apr_pool_t *p, char *dummy) {
     return c;
 }
 
-static const char *set_regexp(cmd_parms *cmd, png_conf *c, const char *pattern)
-{
-    return add_regexp_to_array(cmd->pool, &c->arr_rxp, pattern);
-}
-
 // Parses a byte value, returns the value and advances the *src,
 // Sets *src to null on error
 static apr_byte_t scan_byte(char **src, int base = 0) {
@@ -555,7 +550,7 @@ static void register_hooks(apr_pool_t *p) {
 static const command_rec cmds[] = {
     AP_INIT_TAKE1(
         "AHTSE_PNG_RegExp",
-        (cmd_func) set_regexp,
+        (cmd_func) set_regexp<png_conf>,
         0, // self pass arg, added to the config address
         ACCESS_CONF,
         "The request pattern the URI has to match"
