@@ -36,3 +36,6 @@
 Debug
 Release
 .vs
+
+# Local files
+*.lcl
