@@ -1,2 +1,2 @@
-# mod_ahtse_png
-An Apache (AHTSE) module that modifies PNG tags
+# mod_pngmod
+An Apache (AHTSE) module that modifies PNG tags without decoding the image
