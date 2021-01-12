@@ -19,13 +19,13 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\mod_ahtse_png.cpp" />
+    <ClCompile Include="src\mod_pngmod.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>15.0</VCProjectVersion>
     <ProjectGuid>{EC3BEB35-0660-4111-8BC4-CB12EB6E5D1D}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
-    <RootNamespace>modahtsepng</RootNamespace>
+    <RootNamespace>modpngmod</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -53,7 +53,7 @@
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v142</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
-    <CharacterSet>Unicode</CharacterSet>
+    <CharacterSet>NotSet</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
@@ -90,6 +90,7 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
+    <TargetExt>.so</TargetExt>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -105,8 +106,8 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>\Apache24\lib</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libahtse.lib;libhttpd.lib;libapr-2.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalOptions>/EXPORT:ahtse_png_module,@1</AdditionalOptions>
+      <AdditionalDependencies>libahtse.lib;libhttpd.lib;libapr.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>/EXPORT:pngmod_module,@1</AdditionalOptions>
     </Link>
     <PostBuildEvent>
       <Command>copy /y $(TargetPath) \Apache24\modules</Command>
@@ -127,7 +128,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>libahtse.lib;libhttpd.lib;libapr.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>\Apache24\lib</AdditionalLibraryDirectories>
-      <AdditionalOptions>/EXPORT:ahtse_png_module,@1</AdditionalOptions>
+      <AdditionalOptions>/EXPORT:pngmod_module,@1</AdditionalOptions>
     </Link>
     <PostBuildEvent>
       <Command>copy /y $(TargetPath) \Apache24\modules</Command>

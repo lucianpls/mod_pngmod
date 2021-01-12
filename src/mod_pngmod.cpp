@@ -17,10 +17,10 @@ using namespace std;
 
 NS_AHTSE_USE
 
-extern module AP_MODULE_DECLARE_DATA ahtse_png_module;
+extern module AP_MODULE_DECLARE_DATA pngmod_module;
 
 #if defined(APLOG_USE_MODULE)
-APLOG_USE_MODULE(ahtse_png);
+APLOG_USE_MODULE(pngmod);
 #endif
 
 // Colors, anonymous enum
@@ -379,7 +379,7 @@ static int handler(request_rec *r) {
     if (r->method_number != M_GET)
         return DECLINED;
 
-    png_conf *cfg = get_conf<png_conf>(r, &ahtse_png_module);
+    png_conf *cfg = get_conf<png_conf>(r, &pngmod_module);
     if ((cfg->indirect && !r->main)
         || !requestMatches(r, cfg->arr_rxp))
         return DECLINED;
@@ -549,7 +549,7 @@ static void register_hooks(apr_pool_t *p) {
 
 static const command_rec cmds[] = {
     AP_INIT_TAKE1(
-        "AHTSE_PNG_RegExp",
+        "PNGMOD_RegExp",
         (cmd_func) set_regexp<png_conf>,
         0, // self pass arg, added to the config address
         ACCESS_CONF,
@@ -557,7 +557,7 @@ static const command_rec cmds[] = {
     )
 
     ,AP_INIT_TAKE12(
-        "AHTSE_PNG_Source",
+        "PNGMOD_Source",
         (cmd_func) set_source<png_conf>,
         0,
         ACCESS_CONF,
@@ -566,7 +566,7 @@ static const command_rec cmds[] = {
     )
 
     ,AP_INIT_FLAG(
-        "AHTSE_PNG_Indirect",
+        "PNGMOD_Indirect",
         (cmd_func) ap_set_flag_slot,
         (void *)APR_OFFSETOF(png_conf, indirect),
         ACCESS_CONF, // availability
@@ -574,7 +574,7 @@ static const command_rec cmds[] = {
     )
 
     ,AP_INIT_TAKE1(
-        "AHTSE_PNG_ConfigurationFile",
+        "PNGMOD_ConfigurationFile",
         (cmd_func) configure,
         0,
         ACCESS_CONF,
@@ -582,7 +582,7 @@ static const command_rec cmds[] = {
     )
 
     ,AP_INIT_FLAG(
-        "AHTSE_PNG_Only",
+        "PNGMOD_Only",
         (cmd_func) ap_set_flag_slot,
         (void *)APR_OFFSETOF(png_conf, only),
         ACCESS_CONF, // availability
@@ -593,7 +593,7 @@ static const command_rec cmds[] = {
     ,{NULL}
 };
 
-module AP_MODULE_DECLARE_DATA ahtse_png_module = {
+module AP_MODULE_DECLARE_DATA pngmod_module = {
     STANDARD20_MODULE_STUFF,
     create_dir_config,
     0,  // merge_dir_config

@@ -1,4 +1,4 @@
-MODULE = mod_ahtse_png
+MODULE = mod_pngmod
 C_SRC = $(MODULE).cpp
 FILES = $(C_SRC)
 

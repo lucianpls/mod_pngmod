@@ -15,7 +15,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\mod_ahtse_png.cpp">
+    <ClCompile Include="src\mod_pngmod.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

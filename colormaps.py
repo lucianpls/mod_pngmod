@@ -1068,7 +1068,7 @@ cmaps = {
 
 
 def entries(data, begin = 0, end = 256):
-    '''Generate color palette entries to be used in mod_ahtse_png configuration.
+    '''Generate color palette entries to be used in mod_pngmod configuration.
 The begin and end parameters can be used to pack the color palette into a specific entry index range'''
 
     def topalette(data, indices):
@@ -1080,6 +1080,6 @@ The begin and end parameters can be used to pack the color palette into a specif
     palette = tuple(topalette(data, indices))
     return (f"Entry {i + begin} {palette[i][0]} {palette[i][1]} {palette[i][2]}" for i in range(values))
 
-# To generate the entries required for mod_ahtse_png, use something like this
+# To generate the entries required for mod_pngmod, use something like this
 for line in entries(cmaps['magma'], 173):
    print(line)
