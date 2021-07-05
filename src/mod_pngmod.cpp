@@ -44,13 +44,13 @@ static const apr_byte_t IEND[4] = { 0x49, 0x45, 0x4e, 0x44 };
 // Thus an empty chunk takes at least 12 bytes
 
 // Compares 4 bytes
-static int is_same_4(const apr_byte_t *s1, const apr_byte_t *s2) {
+static bool is_same_4(const apr_byte_t *s1, const apr_byte_t *s2) {
     return s1[0] == s2[0] && s1[1] == s2[1] && 
         s1[2] == s2[2] && s1[3] == s2[3];
 }
 
 // Compares 8 bytes
-static int is_same_8(const apr_byte_t *s1, const apr_byte_t *s2) {
+static bool is_same_8(const apr_byte_t *s1, const apr_byte_t *s2) {
     return is_same_4(s1, s2) && is_same_4(s1 + 4, s2 + 4);
 }
 
@@ -119,7 +119,7 @@ static apr_uint32_t update_crc32(unsigned char *buf, int len,
     return val;
 }
 
-static const int MIN_C_LEN = 12;
+static const size_t MIN_C_LEN = 12;
 
 // The transmitted value is 1's complement
 static apr_uint32_t crc32(unsigned char *buf, int len)
@@ -158,7 +158,7 @@ static bool is_chunk(const apr_byte_t *HSIG, void *buff) {
 static apr_byte_t *find_chunk(const apr_byte_t *HSIG, 
     storage_manager &mgr, int occurence = 1)
 {
-    int off = 8; // How far we got
+    size_t off = 8; // How far we got
     apr_byte_t *p = reinterpret_cast<apr_byte_t *>(mgr.buffer); // First chunk
     while (off + MIN_C_LEN <= mgr.size) { // Need at least LEN + SIG + CHECKSUM
         apr_byte_t *chunk = p + off;
@@ -290,7 +290,7 @@ static const char *configure(cmd_parms *cmd, png_conf *c, const char *fname)
 
         // build PLTE chunk
         auto chunk = reinterpret_cast<apr_byte_t *>(
-            apr_pcalloc(cmd->pool, 3 * len + MIN_C_LEN));
+            apr_pcalloc(cmd->pool, MIN_C_LEN + 3 * len));
         poke_u32be(chunk, 3 * len);
         poke_u32be(chunk + 4, peek_u32be(PLTE));
         apr_byte_t *p = chunk + 8;
