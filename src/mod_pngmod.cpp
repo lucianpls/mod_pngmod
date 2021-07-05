@@ -16,6 +16,7 @@
 using namespace std;
 
 NS_AHTSE_USE
+NS_ICD_USE
 
 extern module AP_MODULE_DECLARE_DATA pngmod_module;
 
@@ -340,8 +341,8 @@ static int get_tile(request_rec *r, const char *remote, sloc_t tile,
     }
 
     receive_ctx rctx;
-    rctx.buffer = dst.buffer;
-    rctx.maxsize = dst.size;
+    rctx.buffer = static_cast<char *>(dst.buffer);
+    rctx.maxsize = static_cast<int>(dst.size);
     rctx.size = 0;
     char *stile = apr_psprintf(r->pool, "/%d/%d/%d/%d",
         static_cast<int>(tile.z),
@@ -385,7 +386,7 @@ static int handler(request_rec *r) {
         return DECLINED;
 
     // Our request
-    sz tile;
+    sz5 tile;
     if (APR_SUCCESS != getMLRC(r, tile))
         return HTTP_BAD_REQUEST;
 
@@ -429,7 +430,7 @@ static int handler(request_rec *r) {
 
     // If is PNG, is it the right kind ?
     apr_byte_t *pIHDR = find_chunk(IHDR, tilebuf);
-    if (!pIHDR || pIHDR != reinterpret_cast<apr_byte_t *>(tilebuf.buffer + 8)) {
+    if (!pIHDR || pIHDR != reinterpret_cast<apr_byte_t *>(tilebuf.buffer) + 8) {
         // Borken input PNG?
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Input PNG is corrupt %s", r->uri);
         return HTTP_INTERNAL_SERVER_ERROR;
@@ -446,7 +447,7 @@ static int handler(request_rec *r) {
     PG_TYPE ctype = PG_TYPE(pIHDR[IHDR_ctype]);
 
     // Figure out the size, adjust existing chunks
-    int outlen = tilebuf.size;
+    auto outlen = tilebuf.size;
     apr_byte_t *chunk = nullptr;
 
     // Subtractions
