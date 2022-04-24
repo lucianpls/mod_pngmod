@@ -356,7 +356,7 @@ static int get_tile(request_rec *r, const char *remote, sloc_t tile,
     char *sub_uri = apr_pstrcat(r->pool, remote, "/tile", stile, suffix, NULL);
     request_rec *sr = ap_sub_req_lookup_uri(sub_uri, r, r->output_filters);
     ap_filter_t *rf = ap_add_output_filter_handle(receive_filter, &rctx, sr, sr->connection);
-    int code = ap_run_sub_req(sr); // returns call status
+    int code = ap_run_sub_req(sr); // returns call status or success
     ap_remove_output_filter(rf);
 
     int status = sr->status;       // http code
@@ -369,7 +369,7 @@ static int get_tile(request_rec *r, const char *remote, sloc_t tile,
 
     ap_destroy_sub_req(sr);
 
-    if (code == APR_SUCCESS && status == HTTP_OK)
+    if (code == APR_SUCCESS || status == HTTP_OK)
         return APR_SUCCESS;
 
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "%s failed, %d", sub_uri, status);
